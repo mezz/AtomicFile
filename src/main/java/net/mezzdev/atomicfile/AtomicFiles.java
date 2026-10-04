@@ -1,287 +1,143 @@
-package net.mezzdev.config.file;
+package net.mezzdev.atomicfile;
 
-import org.jetbrains.annotations.Nullable;
+import net.mezzdev.atomicfile.internal.FileIo;
+import net.mezzdev.atomicfile.internal.FilePermissions;
 
-import java.io.BufferedWriter;
-import java.io.ByteArrayOutputStream;
 import java.io.IOException;
-import java.io.InputStream;
-import java.io.InterruptedIOException;
-import java.io.OutputStreamWriter;
-import java.nio.ByteBuffer;
-import java.nio.channels.FileChannel;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.AccessDeniedException;
-import java.nio.file.AtomicMoveNotSupportedException;
-import java.nio.file.FileAlreadyExistsException;
-import java.nio.file.FileSystemException;
-import java.nio.file.FileSystems;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
-import java.nio.file.StandardOpenOption;
-import java.security.DigestOutputStream;
-import java.security.MessageDigest;
-import java.util.Arrays;
-import java.util.List;
+import java.util.Objects;
 
-public final class ConfigFileUtil {
-	public static final int MAX_BACKUPS = 5;
-	private static final int IO_RETRIES = 5;
-	private static final long IO_RETRY_DELAY_MILLIS = 50;
+/**
+ * Updates files after preparing their complete new contents.
+ * Writes and copies use a temporary file in the destination directory. Default replacement is atomic:
+ * readers see the complete old file or the complete new file.
+ * Use the overloads accepting {@link WriteOptions} to share customized settings across writes and copies.
+ * <p>
+ * These methods do not lock files. Concurrent writes can replace each other's results.
+ */
+public final class AtomicFiles {
+	private AtomicFiles() {}
 
-	private ConfigFileUtil() {
-	}
-
-	public static void writeUsingTempFile(Path path, List<? extends CharSequence> lines) throws IOException {
-		writeUsingTempFileAndGetFingerprint(path, lines);
-	}
-
-	static String writeUsingTempFileAndGetFingerprint(Path path, List<? extends CharSequence> lines) throws IOException {
-		return writeUsingTempFileAndGetFingerprint(path, lines, null);
-	}
-
-	static String writeUsingTempFileAndGetFingerprint(
-		Path path,
-		List<? extends CharSequence> lines,
-		@Nullable String loadedFingerprint
-	) throws IOException {
-		validateReadableContents(lines);
-		ByteArrayOutputStream output = new ByteArrayOutputStream();
-		MessageDigest digest = ConfigFileReader.newFingerprintDigest();
-		try (BufferedWriter writer = new BufferedWriter(new OutputStreamWriter(
-			new DigestOutputStream(output, digest),
-			StandardCharsets.UTF_8
-		))) {
-			for (CharSequence line : lines) {
-				writer.append(line);
-				writer.newLine();
-			}
-		}
-		byte[] bytes = output.toByteArray();
-		String fingerprint = ConfigFileReader.finishFingerprint(digest);
-		// A startup refresh can compare with the bytes already read while loading the config.
-		boolean unchanged;
-		if (loadedFingerprint == null) {
-			unchanged = hasSameContents(path, bytes);
-		} else {
-			unchanged = fingerprint.equals(loadedFingerprint);
-		}
-		if (unchanged) {
-			return fingerprint;
-		}
-		Path tempFileDirectory = createParentDirectories(path);
-		Path tempFile = Files.createTempFile(tempFileDirectory, null, null);
-		try {
-			writeTempFile(tempFile, bytes);
-			moveAtomicReplace(tempFile, path);
-			return fingerprint;
-		} catch (IOException | RuntimeException | Error failure) {
-			deleteTempFile(tempFile, failure);
-			throw failure;
-		}
-	}
-
-	static void writeTempFile(Path tempFile, byte[] bytes) throws IOException {
-		// createTempFile closes its handle. A scanner can deny write sharing before this reopen.
-		withRetry(tempFile, () -> {
-			try (FileChannel channel = FileChannel.open(tempFile, StandardOpenOption.WRITE, StandardOpenOption.TRUNCATE_EXISTING)) {
-				ByteBuffer buffer = ByteBuffer.wrap(bytes);
-				while (buffer.hasRemaining()) {
-					channel.write(buffer);
-				}
-				channel.force(true);
-			}
-			return tempFile;
-		});
-	}
-
-	static void writeTempFile(Path tempFile, List<? extends CharSequence> lines) throws IOException {
-		withRetry(tempFile, () -> {
-			Files.write(tempFile, lines);
-			force(tempFile);
-			return tempFile;
-		});
-	}
-
-	static void copyToTempFile(Path source, Path tempFile) throws IOException {
-		withRetry(source, () -> {
-			Files.copy(source, tempFile, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.COPY_ATTRIBUTES);
-			force(tempFile);
-			return tempFile;
-		});
-	}
-
-	private static void force(Path path) throws IOException {
-		try (FileChannel channel = FileChannel.open(path, StandardOpenOption.WRITE)) {
-			channel.force(true);
-		}
-	}
-
-	private static boolean hasSameContents(Path path, byte[] bytes) {
-		try (InputStream input = Files.newInputStream(path)) {
-			return Arrays.equals(bytes, input.readNBytes(bytes.length + 1));
-		} catch (IOException ignored) {
-			// Comparing is optional: missing or unreadable files still get a normal save attempt.
-			return false;
-		}
-	}
-
-	public static void validateReadableContents(List<? extends CharSequence> lines) {
-		if (lines.size() > ConfigFileReader.MAX_FILE_LINES) {
-			throw excessiveLineCount();
-		}
-		int lineSeparatorBytes = System.lineSeparator().getBytes(StandardCharsets.UTF_8).length;
-		long totalLines = lines.size();
-		long totalBytes = 0;
-		for (CharSequence line : lines) {
-			totalLines += countEmbeddedLineSeparators(line);
-			if (totalLines > ConfigFileReader.MAX_FILE_LINES) {
-				throw excessiveLineCount();
-			}
-			totalBytes += line.toString().getBytes(StandardCharsets.UTF_8).length + lineSeparatorBytes;
-			if (totalBytes > ConfigFileReader.MAX_FILE_BYTES) {
-				throw new IllegalArgumentException(
-					"Serialized config file exceeds the maximum supported size of " + ConfigFileReader.MAX_FILE_BYTES + " bytes."
-				);
-			}
-		}
-	}
-
-	private static long countEmbeddedLineSeparators(CharSequence line) {
-		long count = 0;
-		for (int index = 0; index < line.length(); index++) {
-			char character = line.charAt(index);
-			if (character == '\r') {
-				count++;
-				if (index + 1 < line.length() && line.charAt(index + 1) == '\n') {
-					index++;
-				}
-			} else if (character == '\n') {
-				count++;
-			}
-		}
-		return count;
-	}
-
-	private static IllegalArgumentException excessiveLineCount() {
-		return new IllegalArgumentException(
-			"Serialized config file exceeds the maximum supported line count of " + ConfigFileReader.MAX_FILE_LINES + "."
-		);
+	/**
+	 * Replaces the destination with the supplied bytes.
+	 * Uses {@link WriteOptions#DEFAULT}, which requires atomic replacement.
+	 *
+	 * @param target the destination file
+	 * @param bytes the new contents. Keep the array unchanged until this call returns.
+	 * @throws IOException if writing or replacement fails
+	 * @throws IllegalArgumentException if the target is a filesystem root
+	 */
+	public static void write(Path target, byte[] bytes) throws IOException {
+		write(target, bytes, WriteOptions.DEFAULT);
 	}
 
 	/**
-	 * Replaces the target atomically when supported by this move's filesystem/provider.
-	 * Falls back to a non-atomic replacement only when atomic moving or replacing is unsupported.
-	 * Windows sharing/access failures use a limited number of retries with increasing delays.
-	 * They must not trigger the non-atomic fallback, which can delete the target before the rename.
-	 * Atomic visibility does not guarantee that the directory entry survives power loss.
+	 * Replaces the destination with the supplied bytes.
+	 * The library writes a temporary file before replacing the destination. A failure before replacement
+	 * leaves the destination unchanged. On failure, the library tries to delete the temporary file.
+	 * {@link AtomicMovePolicy} defines the guarantees during replacement.
+	 * <p>
+	 * With the default permission policy, a symbolic link at the destination is replaced.
+	 * The file referenced by that link is unchanged. Permission preservation rejects symbolic links.
+	 *
+	 * @param target the destination file
+	 * @param bytes the new contents. Keep the array unchanged until this call returns.
+	 * @param options the write settings
+	 * @throws IOException if writing or replacement fails
+	 * @throws IllegalArgumentException if the target is a filesystem root
 	 */
-	public static void moveAtomicReplace(Path source, Path target) throws IOException {
+	public static void write(Path target, byte[] bytes, WriteOptions options) throws IOException {
+		Objects.requireNonNull(bytes, "bytes");
+		writeForced(target, temporaryFile -> FileIo.write(temporaryFile, bytes, options.retryTimeout()), options);
+	}
+
+	/**
+	 * Replaces the destination with contents supplied by the writer.
+	 * Uses {@link WriteOptions#DEFAULT}, which requires atomic replacement.
+	 * The writer receives an empty temporary file and must follow {@link FileContentWriter}.
+	 *
+	 * @param target the destination file
+	 * @param writer the writer for the new contents
+	 * @throws IOException if writing or replacement fails
+	 * @throws IllegalArgumentException if the target is a filesystem root
+	 */
+	public static void write(Path target, FileContentWriter writer) throws IOException {
+		write(target, writer, WriteOptions.DEFAULT);
+	}
+
+	/**
+	 * Replaces the destination with contents supplied by the writer.
+	 * The library calls the writer with an empty temporary file. If the writer throws, the destination
+	 * is unchanged. {@link FileContentWriter} describes the writer's responsibilities.
+	 * Replacement and cleanup follow {@link #write(Path, byte[], WriteOptions)}.
+	 *
+	 * @param target the destination file
+	 * @param writer the writer for the new contents
+	 * @param options the write settings
+	 * @throws IOException if writing or replacement fails
+	 * @throws IllegalArgumentException if the target is a filesystem root
+	 */
+	public static void write(Path target, FileContentWriter writer, WriteOptions options) throws IOException {
+		Objects.requireNonNull(writer, "writer");
+		writeForced(target, temporaryFile -> {
+			writer.write(temporaryFile);
+			FileIo.force(temporaryFile, options.retryTimeout());
+		}, options);
+	}
+
+	private static void writeForced(Path target, FileContentWriter writer, WriteOptions options) throws IOException {
+		Objects.requireNonNull(options, "options");
+		Path absoluteTarget = absoluteTarget(target);
+		Path parent = absoluteTarget.getParent();
+		FilePermissions permissions = FilePermissions.capture(absoluteTarget, options.permissionPolicy(), options.retryTimeout());
+		FileIo.prepareParent(parent, options);
+		Path temporaryFile = FileIo.retry(parent, options.retryTimeout(), () -> Files.createTempFile(parent, ".atomic-file-", ".tmp"));
 		try {
-			withRetry(source, () -> Files.move(source, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING));
-		} catch (AtomicMoveNotSupportedException | FileAlreadyExistsException unsupported) {
-			// Support depends on this move, not on the operating system or earlier saves.
-			try {
-				Files.move(source, target, StandardCopyOption.REPLACE_EXISTING);
-			} catch (IOException failure) {
-				failure.addSuppressed(unsupported);
-				throw failure;
-			}
-		}
-	}
-
-	/** Only retry operations that can safely restart; never retry a non-atomic replacement. */
-	private static <T> T withRetry(Path path, IoOperation<T> operation) throws IOException {
-		for (int retry = 0;; retry++) {
-			try {
-				return operation.run();
-			} catch (FileSystemException failure) {
-				if (retry >= IO_RETRIES || !isRetryableFailure(path, failure)) {
-					throw failure;
-				}
-				try {
-					Thread.sleep(IO_RETRY_DELAY_MILLIS << retry);
-				} catch (InterruptedException interrupted) {
-					Thread.currentThread().interrupt();
-					InterruptedIOException aborted = new InterruptedIOException("Interrupted while accessing " + path);
-					aborted.initCause(interrupted);
-					aborted.addSuppressed(failure);
-					throw aborted;
-				}
-			}
-		}
-	}
-
-	private static boolean isRetryableFailure(Path path, FileSystemException failure) {
-		// Retry temporary Windows file-access conflicts: an editor or antivirus scanner may
-		// briefly hold a file open in a way that blocks our operation. Retrying gives that
-		// process time to release the file instead of immediately failing the config operation.
-		// OpenJDK maps access denial to AccessDeniedException and sharing violations to plain
-		// FileSystemException. The native error code is unavailable and the reason is localized.
-		// These types can also indicate permanent failures, so the number of retries is limited.
-		return FileSystems.getDefault().getSeparator().equals("\\") &&
-			path.getFileSystem() == FileSystems.getDefault() &&
-			(failure instanceof AccessDeniedException || failure.getClass() == FileSystemException.class);
-	}
-
-	@FunctionalInterface
-	private interface IoOperation<T> {
-		T run() throws IOException;
-	}
-
-	public static Path backUpFile(Path path, int maxBackups) throws IOException {
-		if (maxBackups < 1) {
-			throw new IllegalArgumentException("maxBackups must be positive.");
-		}
-		Path newestBackup = getBackupPath(path, 1);
-		if (Files.exists(newestBackup) && withRetry(path, () -> Files.mismatch(path, newestBackup)) == -1) {
-			return newestBackup;
-		}
-		Path tempFileDirectory = createParentDirectories(path);
-		Path stagedBackup = Files.createTempFile(tempFileDirectory, null, ".mezz-config-backup");
-		try {
-			withRetry(path, () -> Files.copy(path, stagedBackup, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.COPY_ATTRIBUTES));
-			for (int index = maxBackups; index > 1; index--) {
-				Path previous = getBackupPath(path, index - 1);
-				if (Files.exists(previous)) {
-					moveAtomicReplace(previous, getBackupPath(path, index));
-				}
-			}
-			moveAtomicReplace(stagedBackup, newestBackup);
-			return newestBackup;
+			writer.write(temporaryFile);
+			permissions.apply(temporaryFile);
+			FileIo.moveReplace(temporaryFile, absoluteTarget, options.atomicMovePolicy(), options.retryTimeout());
 		} catch (IOException | RuntimeException | Error failure) {
-			deleteTempFile(stagedBackup, failure);
+			FileIo.cleanup(temporaryFile, failure, options.retryTimeout());
 			throw failure;
 		}
 	}
 
-	private static void deleteTempFile(Path path, Throwable failure) {
-		try {
-			deleteIfExists(path);
-		} catch (IOException cleanupFailure) {
-			failure.addSuppressed(cleanupFailure);
+	private static Path absoluteTarget(Path target) {
+		Path absoluteTarget = target.toAbsolutePath();
+		if (absoluteTarget.getParent() == null) {
+			throw new IllegalArgumentException("Target must have a parent directory: " + target);
 		}
+		return absoluteTarget;
 	}
 
-	static void deleteIfExists(Path path) throws IOException {
-		withRetry(path, () -> Files.deleteIfExists(path));
+	/**
+	 * Replaces the destination with a copy of the source contents.
+	 * The source is kept. Uses {@link WriteOptions#DEFAULT}, which requires atomic replacement.
+	 *
+	 * @param source the file to copy. Keep it unchanged until this call returns.
+	 * @param target the destination file
+	 * @throws IOException if copying or replacement fails
+	 * @throws IllegalArgumentException if the target is a filesystem root
+	 */
+	public static void copy(Path source, Path target) throws IOException {
+		copy(source, target, WriteOptions.DEFAULT);
 	}
 
-	public static Path backUpFile(Path path) throws IOException {
-		return backUpFile(path, MAX_BACKUPS);
-	}
-
-	private static Path createParentDirectories(Path path) throws IOException {
-		Path parent = path.getParent();
-		if (parent == null) {
-			return Path.of(".");
-		}
-		withRetry(parent, () -> Files.createDirectories(parent));
-		return parent;
-	}
-
-	public static Path getBackupPath(Path path, int index) {
-		return path.resolveSibling(path.getFileName() + ".bak." + index);
+	/**
+	 * Replaces the destination with a copy of the source contents.
+	 * The source is kept and may be on another filesystem. Source symbolic links are followed.
+	 * Only contents are copied. Source permissions and other attributes are not copied.
+	 * Replacement and cleanup follow {@link #write(Path, byte[], WriteOptions)}.
+	 *
+	 * @param source the file to copy. Keep it unchanged until this call returns.
+	 * @param target the destination file
+	 * @param options the copy settings
+	 * @throws IOException if copying or replacement fails
+	 * @throws IllegalArgumentException if the target is a filesystem root
+	 */
+	public static void copy(Path source, Path target, WriteOptions options) throws IOException {
+		Objects.requireNonNull(source, "source");
+		writeForced(target, temporaryFile -> FileIo.copy(source, temporaryFile, options.retryTimeout()), options);
 	}
 }

@@ -1,0 +1,170 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - '**'
+    tags:
+      - 'v*.*.*'
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }}, Java ${{ matrix.java }})
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+      id-token: write
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+        java: [17, 21, 25]
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Java
+        uses: actions/setup-java@03ad4de0992f5dab5e18fcb136590ce7c4a0ac95 # v5
+        with:
+          distribution: temurin
+          java-version: ${{ matrix.java }}
+          cache: maven
+
+      - name: Verify with Maven
+        if: runner.os != 'Windows'
+        run: ./mvnw --batch-mode --no-transfer-progress verify
+
+      - name: Verify with Maven
+        if: runner.os == 'Windows'
+        run: ./mvnw.cmd --batch-mode --no-transfer-progress verify
+
+      - name: Summarize integration coverage
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os
+          import xml.etree.ElementTree as ET
+          report = ET.parse('target/site/jacoco/jacoco.xml').getroot()
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as summary:
+              summary.write('### Integration coverage\n\n| Metric | Covered | Total | Coverage |\n| --- | ---: | ---: | ---: |\n')
+              for counter in report.findall('counter'):
+                  if counter.get('type') in ('LINE', 'BRANCH'):
+                      covered = int(counter.get('covered'))
+                      total = covered + int(counter.get('missed'))
+                      summary.write(f'| {counter.get("type").title()} | {covered} | {total} | {covered / total:.2%} |\n')
+          PY
+
+      - name: Upload integration test and coverage reports
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: integration-coverage-${{ matrix.os }}-java-${{ matrix.java }}
+          path: |
+            target/site/jacoco/
+            target/jacoco.exec
+            target/surefire-reports/
+          if-no-files-found: error
+
+      - name: Upload coverage to Codecov
+        if: github.actor != 'dependabot[bot]' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
+        with:
+          use_oidc: true
+          files: target/site/jacoco/jacoco.xml
+          disable_search: true
+          flags: ${{ runner.os }}
+          name: integration-${{ runner.os }}-java-${{ matrix.java }}
+          fail_ci_if_error: true
+
+  publish:
+    name: Publish to Maven Central
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment:
+      name: maven-central
+    concurrency:
+      group: maven-central-publish
+      cancel-in-progress: false
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Read release version from tag
+        id: version
+        shell: bash
+        run: |
+          release_version="${GITHUB_REF_NAME#v}"
+          if [[ ! "$release_version" =~ ^[0-9]+(\.[0-9]+){2}(-[A-Za-z0-9][A-Za-z0-9.-]*)?$ ]]; then
+            echo "Tag '$GITHUB_REF_NAME' is not a supported release tag. Use tags like v0.1.0."
+            exit 1
+          fi
+          echo "release_version=$release_version" >> "$GITHUB_OUTPUT"
+
+      - name: Check publishing credentials
+        env:
+          MAVEN_CENTRAL_USERNAME: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
+          MAVEN_CENTRAL_PASSWORD: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
+          MAVEN_GPG_PRIVATE_KEY: ${{ secrets.MAVEN_GPG_PRIVATE_KEY }}
+        shell: bash
+        run: |
+          missing=false
+          for name in MAVEN_CENTRAL_USERNAME MAVEN_CENTRAL_PASSWORD MAVEN_GPG_PRIVATE_KEY; do
+            if [[ -z "${!name}" ]]; then
+              echo "::error::Missing Actions secret: $name. Configure it in the maven-central environment or repository."
+              missing=true
+            fi
+          done
+          if [[ "$missing" == true ]]; then
+            exit 1
+          fi
+
+      - name: Set up Java and Maven Central credentials
+        uses: actions/setup-java@03ad4de0992f5dab5e18fcb136590ce7c4a0ac95 # v5
+        with:
+          distribution: temurin
+          java-version: 17
+          cache: maven
+          server-id: central
+          server-username: MAVEN_CENTRAL_USERNAME
+          server-password: MAVEN_CENTRAL_PASSWORD
+          gpg-private-key: ${{ secrets.MAVEN_GPG_PRIVATE_KEY }}
+          gpg-passphrase: MAVEN_GPG_PASSPHRASE
+
+      - name: Verify project version matches tag
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.release_version }}
+        shell: bash
+        run: |
+          pom_version="$(./mvnw --batch-mode --no-transfer-progress help:evaluate -Dexpression=project.version -q -DforceStdout)"
+          if [[ "$pom_version" != "$RELEASE_VERSION" ]]; then
+            echo "Tag '$GITHUB_REF_NAME' resolves to '$RELEASE_VERSION', but pom.xml declares '$pom_version'."
+            exit 1
+          fi
+          if [[ "$pom_version" == *-SNAPSHOT ]]; then
+            echo "Release tags must not publish SNAPSHOT versions."
+            exit 1
+          fi
+
+      - name: Publish to Maven Central
+        env:
+          MAVEN_CENTRAL_USERNAME: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
+          MAVEN_CENTRAL_PASSWORD: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
+          MAVEN_GPG_PASSPHRASE: ${{ secrets.MAVEN_GPG_PASSPHRASE }}
+        run: ./mvnw --batch-mode --no-transfer-progress -Prelease -Dcentral.autoPublish=true -Dcentral.waitUntil=published deploy

@@ -1,0 +1,15 @@
+codecov:
+  # Wait for all operating system and Java version reports before evaluating coverage.
+  notify:
+    after_n_builds: 9
+
+coverage:
+  status:
+    project:
+      default:
+        target: auto
+    patch:
+      default:
+        target: 90%
+
+comment: false
