@@ -16,9 +16,6 @@ jobs:
   test:
     name: Test (${{ matrix.os }}, Java ${{ matrix.java }})
     runs-on: ${{ matrix.os }}
-    permissions:
-      contents: read
-      id-token: write
     timeout-minutes: 20
     strategy:
       fail-fast: false
@@ -76,17 +73,6 @@ jobs:
             target/jacoco.exec
             target/surefire-reports/
           if-no-files-found: error
-
-      - name: Upload coverage to Codecov
-        if: github.actor != 'dependabot[bot]' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
-        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
-        with:
-          use_oidc: true
-          files: target/site/jacoco/jacoco.xml
-          disable_search: true
-          flags: ${{ runner.os }}
-          name: integration-${{ runner.os }}-java-${{ matrix.java }}
-          fail_ci_if_error: true
 
   publish:
     name: Publish to Maven Central

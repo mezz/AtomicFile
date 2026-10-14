@@ -1,6 +1,6 @@
 # AtomicFile
 
-[![Coverage](https://codecov.io/gh/mezz/AtomicFile/branch/main/graph/badge.svg)](https://codecov.io/gh/mezz/AtomicFile)
+[![CI](https://github.com/mezz/AtomicFile/actions/workflows/ci.yml/badge.svg)](https://github.com/mezz/AtomicFile/actions/workflows/ci.yml)
 
 AtomicFile is a Java library for updating configuration files, saved state, and
 other files without exposing partially written contents. It writes to a temporary
@@ -97,6 +97,8 @@ or other metadata.
 Run `./mvnw verify` to build and run the integration tests. CI tests Java 17, 21,
 and 25 on Linux, macOS, and Windows. The local coverage report is
 `target/site/jacoco/index.html`.
+Each CI job displays line and branch coverage in its GitHub Actions summary and
+uploads the full coverage and test reports as downloadable artifacts.
 
 Pushing a version tag such as `v0.1.0` publishes to Maven Central after CI passes.
 The tag must match the version in `pom.xml`.
