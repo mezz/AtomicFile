@@ -8,7 +8,10 @@ import net.mezzdev.atomicfile.internal.FileIo;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledOnOs;
 import org.junit.jupiter.api.condition.OS;
+import org.junit.jupiter.api.extension.AnnotatedElementContext;
+import org.junit.jupiter.api.extension.ExtensionContext;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.io.TempDirFactory;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
@@ -87,15 +90,15 @@ class AtomicFilesTest {
 	}
 
 	@Test
-	void supportsRelativePathsOnTheDefaultFilesystem() throws IOException {
-		Path target = directory.resolve("data.txt");
+	void supportsRelativePathsOnTheDefaultFilesystem(@TempDir(factory = WorkingDirectoryTempDirFactory.class) Path workingDirectory) throws IOException {
+		Path target = workingDirectory.resolve("data.txt");
 		Path relative = Path.of("").toAbsolutePath().relativize(target);
 		AtomicFiles.write(relative, temporaryFile -> {
-			assertEquals(directory.toRealPath(), temporaryFile.getParent().toRealPath());
+			assertEquals(workingDirectory.toRealPath(), temporaryFile.getParent().toRealPath());
 			Files.writeString(temporaryFile, "complete");
 		});
 		assertEquals("complete", Files.readString(target));
-		assertOnlyContains(directory, target);
+		assertOnlyContains(workingDirectory, target);
 	}
 
 	@ParameterizedTest
@@ -216,6 +219,14 @@ class AtomicFilesTest {
 	private static void assertOnlyContains(Path directory, Path... expected) throws IOException {
 		try (var files = Files.list(directory)) {
 			assertEquals(Arrays.stream(expected).sorted().toList(), files.sorted().toList());
+		}
+	}
+
+	static class WorkingDirectoryTempDirFactory implements TempDirFactory {
+		@Override
+		public Path createTempDirectory(AnnotatedElementContext elementContext, ExtensionContext extensionContext) throws IOException {
+			// Windows can place the system temp directory on a different drive from the checkout.
+			return Files.createTempDirectory(Path.of("").toAbsolutePath(), "atomic-file-relative-");
 		}
 	}
 }
