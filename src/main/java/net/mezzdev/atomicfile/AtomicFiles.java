@@ -4,8 +4,11 @@ import net.mezzdev.atomicfile.internal.FileIo;
 import net.mezzdev.atomicfile.internal.FilePermissions;
 
 import java.io.IOException;
+import java.nio.file.CopyOption;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
+import java.time.Duration;
 import java.util.Objects;
 
 /**
@@ -87,6 +90,12 @@ public final class AtomicFiles {
 	}
 
 	private static void writeForced(Path target, FileContentWriter writer, WriteOptions options) throws IOException {
+		try (StagedFile staged = stageForced(target, writer, options)) {
+			staged.commit();
+		}
+	}
+
+	private static StagedFile stageForced(Path target, FileContentWriter writer, WriteOptions options) throws IOException {
 		Objects.requireNonNull(options, "options");
 		Path absoluteTarget = absoluteTarget(target);
 		Path parent = absoluteTarget.getParent();
@@ -96,7 +105,7 @@ public final class AtomicFiles {
 		try {
 			writer.write(temporaryFile);
 			permissions.apply(temporaryFile);
-			FileIo.moveReplace(temporaryFile, absoluteTarget, options.atomicMovePolicy(), options.retryTimeout());
+			return new StagedFile(temporaryFile, absoluteTarget, options);
 		} catch (IOException | RuntimeException | Error failure) {
 			FileIo.cleanup(temporaryFile, failure, options.retryTimeout());
 			throw failure;
@@ -139,5 +148,127 @@ public final class AtomicFiles {
 	public static void copy(Path source, Path target, WriteOptions options) throws IOException {
 		Objects.requireNonNull(source, "source");
 		writeForced(target, temporaryFile -> FileIo.copy(source, temporaryFile, options.retryTimeout()), options);
+	}
+
+	/**
+	 * Stages bytes with default options.
+	 * @see #stage(Path, byte[], WriteOptions)
+	 */
+	public static StagedFile stage(Path target, byte[] bytes) throws IOException {
+		return stage(target, bytes, WriteOptions.DEFAULT);
+	}
+
+	/**
+	 * Stages flushed bytes without changing the destination.
+	 * Permission policies capture destination permissions during staging.
+	 *
+	 * @param bytes keep unchanged until this call returns
+	 * @throws IllegalArgumentException if the target is a filesystem root
+	 */
+	public static StagedFile stage(Path target, byte[] bytes, WriteOptions options) throws IOException {
+		Objects.requireNonNull(bytes, "bytes");
+		return stageForced(target, temporaryFile -> FileIo.write(temporaryFile, bytes, options.retryTimeout()), options);
+	}
+
+	/**
+	 * Stages a copy with default options.
+	 * @see #stageCopy(Path, Path, WriteOptions, CopyOption[])
+	 */
+	public static StagedFile stageCopy(Path source, Path target) throws IOException {
+		return stageCopy(source, target, WriteOptions.DEFAULT);
+	}
+
+	/**
+	 * Stages a flushed copy without changing either file.
+	 * Only contents are copied by default; destination permission policies override copied permissions.
+	 *
+	 * @param source keep unchanged until this call returns
+	 * @param copyOptions optionally {@code COPY_ATTRIBUTES}; other options are rejected
+	 */
+	public static StagedFile stageCopy(Path source, Path target, WriteOptions options, CopyOption... copyOptions) throws IOException {
+		Objects.requireNonNull(source, "source");
+		Objects.requireNonNull(copyOptions, "copyOptions");
+		for (CopyOption option : copyOptions) {
+			Objects.requireNonNull(option, "copyOption");
+			if (option != StandardCopyOption.COPY_ATTRIBUTES) {
+				throw new IllegalArgumentException("Unsupported staging copy option: " + option);
+			}
+		}
+		boolean copyAttributes = copyOptions.length != 0;
+		return stageForced(target, temporaryFile -> FileIo.copy(source, temporaryFile, options.retryTimeout(), copyAttributes), options);
+	}
+
+	/**
+	 * Snapshots a file with default options.
+	 * @see #snapshot(Path, WriteOptions)
+	 */
+	public static StagedFile snapshot(Path target) throws IOException {
+		return snapshot(target, WriteOptions.DEFAULT);
+	}
+
+	/**
+	 * Snapshots a file and its supported attributes for restoration at the same path.
+	 * Symbolic links are followed; restoration replaces the link with a regular file.
+	 *
+	 * @param target keep unchanged until this call returns
+	 */
+	public static StagedFile snapshot(Path target, WriteOptions options) throws IOException {
+		return stageCopy(target, target, options, StandardCopyOption.COPY_ATTRIBUTES);
+	}
+
+	/**
+	 * Moves a file over the destination atomically, using the default retry timeout.
+	 * @see #moveReplace(Path, Path, AtomicMovePolicy, Duration)
+	 */
+	public static void moveReplace(Path source, Path target) throws IOException {
+		moveReplace(source, target, WriteOptions.DEFAULT.atomicMovePolicy(), WriteOptions.DEFAULT.retryTimeout());
+	}
+
+	/**
+	 * Moves a file over the destination, preserving source attributes.
+	 * Prepare the destination directory first; flush the source if durability is needed.
+	 *
+	 * @param retryTimeout timeout per operation; zero disables retries
+	 */
+	public static void moveReplace(Path source, Path target, AtomicMovePolicy policy, Duration retryTimeout) throws IOException {
+		FileIo.moveReplace(Objects.requireNonNull(source, "source"), Objects.requireNonNull(target, "target"), policy, retryTimeout);
+	}
+
+	/**
+	 * Deletes an entry if present, using the default retry timeout.
+	 * @see #deleteIfExists(Path, Duration)
+	 */
+	public static boolean deleteIfExists(Path path) throws IOException {
+		return deleteIfExists(path, WriteOptions.DEFAULT.retryTimeout());
+	}
+
+	/**
+	 * Deletes a file or empty directory with Windows access retries, without following symbolic links.
+	 *
+	 * @param retryTimeout timeout per operation; zero disables retries
+	 * @return {@code false} if already absent
+	 */
+	public static boolean deleteIfExists(Path path, Duration retryTimeout) throws IOException {
+		return FileIo.deleteIfExists(Objects.requireNonNull(path, "path"), retryTimeout);
+	}
+
+	/**
+	 * Finds the first differing byte, using the default retry timeout.
+	 * @see #mismatch(Path, Path, Duration)
+	 */
+	public static long mismatch(Path first, Path second) throws IOException {
+		return mismatch(first, second, WriteOptions.DEFAULT.retryTimeout());
+	}
+
+	/**
+	 * Finds the first differing byte with Windows access retries.
+	 *
+	 * @param retryTimeout timeout per operation; zero disables retries
+	 * @return {@code -1} if the contents match
+	 */
+	public static long mismatch(Path first, Path second, Duration retryTimeout) throws IOException {
+		Objects.requireNonNull(first, "first");
+		Objects.requireNonNull(second, "second");
+		return FileIo.retry(first, retryTimeout, () -> Files.mismatch(first, second));
 	}
 }

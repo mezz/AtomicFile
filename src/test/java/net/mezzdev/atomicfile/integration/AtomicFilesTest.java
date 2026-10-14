@@ -3,7 +3,6 @@ package net.mezzdev.atomicfile.integration;
 import net.mezzdev.atomicfile.AtomicFiles;
 import net.mezzdev.atomicfile.AtomicMovePolicy;
 import net.mezzdev.atomicfile.WriteOptions;
-import net.mezzdev.atomicfile.internal.FileIo;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledOnOs;
@@ -169,10 +168,10 @@ class AtomicFilesTest {
 		Path target = Files.writeString(directory.resolve("data.txt"), "old");
 		try (var archive = FileSystems.newFileSystem(directory.resolve("data.zip"), Map.of("create", "true"))) {
 			Path source = Files.writeString(archive.getPath("/source"), "new");
-			assertThrows(AtomicMoveNotSupportedException.class, () -> FileIo.moveReplace(source, target, AtomicMovePolicy.REQUIRE_ATOMIC, WriteOptions.DEFAULT.retryTimeout()));
+			assertThrows(AtomicMoveNotSupportedException.class, () -> AtomicFiles.moveReplace(source, target, AtomicMovePolicy.REQUIRE_ATOMIC, WriteOptions.DEFAULT.retryTimeout()));
 			assertEquals("old", Files.readString(target));
 			assertEquals("new", Files.readString(source));
-			FileIo.moveReplace(source, target, AtomicMovePolicy.ALLOW_NON_ATOMIC, WriteOptions.DEFAULT.retryTimeout());
+			AtomicFiles.moveReplace(source, target, AtomicMovePolicy.ALLOW_NON_ATOMIC, WriteOptions.DEFAULT.retryTimeout());
 			assertEquals("new", Files.readString(target));
 			assertFalse(Files.exists(source));
 		}
@@ -184,7 +183,7 @@ class AtomicFilesTest {
 		Path child = Files.writeString(target.resolve("child"), "old");
 		try (var archive = FileSystems.newFileSystem(directory.resolve("data.zip"), Map.of("create", "true"))) {
 			Path source = Files.writeString(archive.getPath("/source"), "new");
-			IOException failure = assertThrows(IOException.class, () -> FileIo.moveReplace(source, target, AtomicMovePolicy.ALLOW_NON_ATOMIC, WriteOptions.DEFAULT.retryTimeout()));
+			IOException failure = assertThrows(IOException.class, () -> AtomicFiles.moveReplace(source, target, AtomicMovePolicy.ALLOW_NON_ATOMIC, WriteOptions.DEFAULT.retryTimeout()));
 			assertInstanceOf(AtomicMoveNotSupportedException.class, failure.getSuppressed()[0]);
 			assertEquals("old", Files.readString(child));
 			assertEquals("new", Files.readString(source));

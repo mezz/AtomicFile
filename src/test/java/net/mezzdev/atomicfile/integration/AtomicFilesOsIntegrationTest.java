@@ -193,7 +193,7 @@ class AtomicFilesOsIntegrationTest {
 		Files.writeString(target, "old");
 		try (var reader = Files.newInputStream(target)) {
 			// Unix rename keeps existing readers on the old file after replacement.
-			FileIo.moveReplace(source, target, AtomicMovePolicy.ALLOW_NON_ATOMIC, WriteOptions.DEFAULT.retryTimeout());
+			AtomicFiles.moveReplace(source, target, AtomicMovePolicy.ALLOW_NON_ATOMIC, WriteOptions.DEFAULT.retryTimeout());
 			assertEquals("old", new String(reader.readAllBytes(), StandardCharsets.UTF_8));
 			assertEquals("new", Files.readString(target));
 			assertFalse(Files.exists(source));
@@ -212,13 +212,13 @@ class AtomicFilesOsIntegrationTest {
 		Path target = Files.writeString(tempDir.resolve("config.ini"), "old");
 		try (var reader = Files.newInputStream(target)) {
 			// Windows can reject replacement even when the reader permits delete sharing.
-			assertThrows(FileSystemException.class, () -> FileIo.moveReplace(source, target, AtomicMovePolicy.ALLOW_NON_ATOMIC, WriteOptions.DEFAULT.retryTimeout()));
+			assertThrows(FileSystemException.class, () -> AtomicFiles.moveReplace(source, target, AtomicMovePolicy.ALLOW_NON_ATOMIC, WriteOptions.DEFAULT.retryTimeout()));
 			assertEquals("old", new String(reader.readAllBytes(), StandardCharsets.UTF_8));
 			assertEquals("old", Files.readString(target));
 			assertEquals("new", Files.readString(source));
 		}
 
-		FileIo.moveReplace(source, target, AtomicMovePolicy.ALLOW_NON_ATOMIC, WriteOptions.DEFAULT.retryTimeout());
+		AtomicFiles.moveReplace(source, target, AtomicMovePolicy.ALLOW_NON_ATOMIC, WriteOptions.DEFAULT.retryTimeout());
 		assertEquals("new", Files.readString(target));
 		assertFalse(Files.exists(source));
 	}
@@ -229,7 +229,7 @@ class AtomicFilesOsIntegrationTest {
 			Path archivedSource = archive.getPath("/source.ini");
 			Files.writeString(archivedSource, "archived");
 			Path extracted = tempDir.resolve("extracted.ini");
-			FileIo.moveReplace(archivedSource, extracted, AtomicMovePolicy.ALLOW_NON_ATOMIC, WriteOptions.DEFAULT.retryTimeout());
+			AtomicFiles.moveReplace(archivedSource, extracted, AtomicMovePolicy.ALLOW_NON_ATOMIC, WriteOptions.DEFAULT.retryTimeout());
 			assertEquals("archived", Files.readString(extracted));
 			assertFalse(Files.exists(archivedSource));
 		}
@@ -268,7 +268,7 @@ class AtomicFilesOsIntegrationTest {
 				CountDownLatch started = new CountDownLatch(1);
 				replacement = executor.submit(() -> {
 					started.countDown();
-					FileIo.moveReplace(source, target, AtomicMovePolicy.ALLOW_NON_ATOMIC, WriteOptions.DEFAULT.retryTimeout());
+					AtomicFiles.moveReplace(source, target, AtomicMovePolicy.ALLOW_NON_ATOMIC, WriteOptions.DEFAULT.retryTimeout());
 					return null;
 				});
 				assertTrue(started.await(5, TimeUnit.SECONDS));
@@ -301,7 +301,7 @@ class AtomicFilesOsIntegrationTest {
 				save = executor.submit(() -> {
 					started.countDown();
 					FileIo.write(staged, bytes);
-					FileIo.moveReplace(staged, target, AtomicMovePolicy.REQUIRE_ATOMIC, WriteOptions.DEFAULT.retryTimeout());
+					AtomicFiles.moveReplace(staged, target, AtomicMovePolicy.REQUIRE_ATOMIC, WriteOptions.DEFAULT.retryTimeout());
 					return null;
 				});
 				assertTrue(started.await(5, TimeUnit.SECONDS));
@@ -330,7 +330,7 @@ class AtomicFilesOsIntegrationTest {
 				CountDownLatch started = new CountDownLatch(1);
 				cleanup = executor.submit(() -> {
 					started.countDown();
-					FileIo.deleteIfExists(staged, WriteOptions.DEFAULT.retryTimeout());
+					AtomicFiles.deleteIfExists(staged, WriteOptions.DEFAULT.retryTimeout());
 					return null;
 				});
 				assertTrue(started.await(5, TimeUnit.SECONDS));
@@ -370,7 +370,7 @@ class AtomicFilesOsIntegrationTest {
 			try {
 				InterruptedIOException failure = assertThrows(
 					InterruptedIOException.class,
-					() -> FileIo.moveReplace(source, target, AtomicMovePolicy.ALLOW_NON_ATOMIC, WriteOptions.DEFAULT.retryTimeout())
+					() -> AtomicFiles.moveReplace(source, target, AtomicMovePolicy.ALLOW_NON_ATOMIC, WriteOptions.DEFAULT.retryTimeout())
 				);
 				assertTrue(Thread.currentThread().isInterrupted());
 				assertTrue(failure.getSuppressed()[0] instanceof FileSystemException);

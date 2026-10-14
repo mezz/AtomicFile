@@ -61,6 +61,8 @@ final class FaultyFileSystem extends FileSystem {
 		return failure;
 	}
 
+	void clearFailure(Operation operation) { failures.remove(operation); }
+
 	Path wrap(Path path) { return new WrappedPath(path); }
 	private Path unwrap(Path path) { return ((WrappedPath) path).path; }
 

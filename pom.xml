@@ -6,7 +6,7 @@
 
     <groupId>net.mezzdev</groupId>
     <artifactId>atomicfile</artifactId>
-    <version>0.1.0</version>
+    <version>0.2.0</version>
     <packaging>jar</packaging>
 
     <name>AtomicFile</name>
@@ -163,6 +163,7 @@
                 <version>${maven-javadoc-plugin.version}</version>
                 <configuration>
                     <release>${java.version}</release>
+                    <doclint>all,-missing</doclint>
                     <excludePackageNames>net.mezzdev.atomicfile.internal</excludePackageNames>
                 </configuration>
                 <executions>

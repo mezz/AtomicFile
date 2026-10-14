@@ -2,6 +2,7 @@ package net.mezzdev.atomicfile.internal;
 
 import net.mezzdev.atomicfile.PermissionPolicy;
 
+import java.io.Closeable;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
@@ -9,9 +10,12 @@ import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.attribute.AclFileAttributeView;
 import java.nio.file.attribute.BasicFileAttributes;
+import java.nio.file.attribute.DosFileAttributeView;
 import java.nio.file.attribute.FileAttributeView;
 import java.nio.file.attribute.PosixFileAttributeView;
+import java.nio.file.attribute.PosixFilePermission;
 import java.time.Duration;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 
@@ -21,6 +25,55 @@ import java.util.Set;
  */
 @FunctionalInterface
 public interface FilePermissions {
+	/** Allows deletion of DOS read-only staging files, restoring the flag if deletion fails. */
+	static Closeable allowDelete(Path path) throws IOException {
+		DosFileAttributeView dos = Files.getFileAttributeView(path, DosFileAttributeView.class);
+		boolean readOnly;
+		try {
+			readOnly = dos != null && dos.readAttributes().isReadOnly();
+		} catch (NoSuchFileException missing) {
+			return () -> {};
+		}
+		if (readOnly) {
+			dos.setReadOnly(false);
+			return () -> {
+				try {
+					dos.setReadOnly(true);
+				} catch (NoSuchFileException deleted) {
+					// A successful deletion consumes the staging file.
+				}
+			};
+		}
+		return () -> {};
+	}
+
+	/** Flushes a copied file while retaining read-only POSIX or DOS attributes. */
+	static void forceCopiedFile(Path path, Duration timeout) throws IOException {
+		try (Closeable ignored = allowWrite(path)) {
+			FileIo.force(path, timeout);
+		}
+	}
+
+	private static Closeable allowWrite(Path path) throws IOException {
+		PosixFileAttributeView posix = Files.getFileAttributeView(path, PosixFileAttributeView.class);
+		if (posix != null) {
+			Set<PosixFilePermission> original = Set.copyOf(posix.readAttributes().permissions());
+			if (!original.contains(PosixFilePermission.OWNER_WRITE)) {
+				Set<PosixFilePermission> writable = new HashSet<>(original);
+				writable.add(PosixFilePermission.OWNER_WRITE);
+				posix.setPermissions(writable);
+				return () -> posix.setPermissions(original);
+			}
+		} else {
+			DosFileAttributeView dos = Files.getFileAttributeView(path, DosFileAttributeView.class);
+			if (dos != null && dos.readAttributes().isReadOnly()) {
+				dos.setReadOnly(false);
+				return () -> dos.setReadOnly(true);
+			}
+		}
+		return () -> {};
+	}
+
 	/**
 	 * Applies the stored permissions to a completed temporary file.
 	 *

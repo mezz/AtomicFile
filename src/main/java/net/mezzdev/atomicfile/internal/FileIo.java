@@ -15,6 +15,7 @@ import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.FileSystemException;
 import java.nio.file.FileSystems;
 import java.nio.file.Files;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
@@ -81,6 +82,17 @@ public final class FileIo {
 		return retry(path, retryTimeout, () -> Files.deleteIfExists(path));
 	}
 
+	/** Deletes staging files even when copied attributes mark them read-only. */
+	public static boolean deleteStagedFile(Path path, Duration retryTimeout) throws IOException {
+		return retry(path, retryTimeout, () -> {
+			try (var ignored = FilePermissions.allowDelete(path)) {
+				return Files.deleteIfExists(path);
+			} catch (NoSuchFileException missing) {
+				return false;
+			}
+		});
+	}
+
 	/**
 	 * Writes bytes to an existing temporary file and flushes them to storage.
 	 * Uses the default retry timeout.
@@ -127,6 +139,21 @@ public final class FileIo {
 	 * @throws IOException if reading, writing, flushing, or closing a file fails
 	 */
 	public static void copy(Path source, Path temporaryFile, Duration timeout) throws IOException {
+		copy(source, temporaryFile, timeout, false);
+	}
+
+	/** Copies and flushes contents, optionally preserving filesystem-supported source attributes. */
+	public static void copy(Path source, Path temporaryFile, Duration timeout, boolean copyAttributes) throws IOException {
+		if (copyAttributes) {
+			retry(temporaryFile, timeout, () -> {
+				try (var ignored = FilePermissions.allowDelete(temporaryFile)) {
+					Files.copy(source, temporaryFile, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.COPY_ATTRIBUTES);
+					FilePermissions.forceCopiedFile(temporaryFile, timeout);
+				}
+				return temporaryFile;
+			});
+			return;
+		}
 		retry(temporaryFile, timeout, () -> {
 			// Keep the staging file's private permissions and force the channel that wrote it.
 			try (var input = Files.newInputStream(source);
@@ -205,7 +232,7 @@ public final class FileIo {
 	 */
 	public static void cleanup(Path path, Throwable failure, Duration timeout) {
 		try {
-			deleteIfExists(path, timeout);
+			deleteStagedFile(path, timeout);
 		} catch (IOException | RuntimeException | Error cleanupFailure) {
 			failure.addSuppressed(cleanupFailure);
 		}
