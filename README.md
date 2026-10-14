@@ -8,7 +8,7 @@ runtime dependencies.
 
 ## Usage
 
-Dependency: `net.mezzdev:atomicfile:0.2.0`.
+Dependency: `net.mezzdev:atomicfile:0.2.1`.
 
 ```java
 import net.mezzdev.atomicfile.AtomicFiles;
